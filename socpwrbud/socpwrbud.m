@@ -253,7 +253,7 @@ static void makeDvfsTables(NSMutableArray* ecpu_table, NSMutableArray* pcpu_tabl
 
             getDfvs(entry, VOLTAGE_STATES_ECPU, ecpu_table, isLegacy);
             getDfvs(entry, VOLTAGE_STATES_PCPU, pcpu_table, isLegacy);
-            getDfvs(entry, VOLTAGE_STATES_GPU, gpu_table, isLegacy);
+            getDfvs(entry, VOLTAGE_STATES_GPU, gpu_table, YES);
 
             break;
         }
