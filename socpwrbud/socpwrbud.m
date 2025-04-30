@@ -35,6 +35,7 @@ extern CFMutableDictionaryRef IOReportCopyChannelsInGroup(NSString* channel,
 
 extern void IOReportMergeChannels(CFMutableDictionaryRef firstChannel,
                                  CFMutableDictionaryRef secondChannel,
+                                 CFMutableDictionaryRef thirdChannel,
                                  CFTypeRef /* nil */);
 
 extern void IOReportIterate(CFDictionaryRef samples, int(^)(CFDictionaryRef channel));
@@ -58,21 +59,24 @@ extern long IOReportSimpleGetIntegerValue(CFDictionaryRef, int);
 #define METRIC_FREQ       "freq"
 #define METRIC_DVFS       "dvfs"
 #define METRIC_DVFSVOLTS  "dvfs_volts"
-//#define METRIC_POWER      "power"
+#define METRIC_POWER      "power"
 #define METRIC_VOLTS      "volts"
 #define METRIC_CORES      "cores"
 
 #define UNIT_ECPU       "ecpu"
 #define UNIT_PCPU       "pcpu"
 #define UNIT_GPU        "gpu"
+#define UNIT_ANE        "ane"
 
-#define METRIC_COUNT 7
-#define UNITS_COUNT 3
-#define OPT_COUNT 7
+#define METRIC_COUNT 8
+#define UNITS_COUNT 4
+#define OPT_COUNT 8
 
 #define VOLTAGE_STATES_ECPU CFSTR("voltage-states1-sram")
 #define VOLTAGE_STATES_PCPU CFSTR("voltage-states5-sram")
 #define VOLTAGE_STATES_GPU CFSTR("voltage-states9")
+#define VOLTAGE_STATES_ANE CFSTR("voltage-states8")
+
 
 typedef struct param_set {
     const char* name;
@@ -85,7 +89,7 @@ static const struct param_set metrics_set[METRIC_COUNT] = {
     { METRIC_FREQ,     "active frequencies" },
     { METRIC_DVFS,     "dvfs (or pstate) distributions, unoccupied states hidden" },
     { METRIC_DVFSVOLTS,"(milli)volts label on dvfs" },
-//    { METRIC_POWER,    "unit power consumptions" },
+    { METRIC_POWER,    "unit power consumptions" },
     { METRIC_VOLTS,    "display (m)voltages" },
     { METRIC_CORES,    "per-core stats on supported units" }
 };
@@ -94,6 +98,7 @@ static const struct param_set units_set[UNITS_COUNT] = {
     { UNIT_ECPU, "efficiency cluster(s) stats" },
     { UNIT_PCPU, "performance cluster(s) stats" },
     { UNIT_GPU,  "integrated graphics stats" },
+    { UNIT_ANE,  "apple neural engine stats" },
 };
 
 static const struct option long_opts[OPT_COUNT] = {
@@ -117,12 +122,14 @@ static const char* long_opts_description[OPT_COUNT] = {
     " <unit>  comma separated list of unit statistics to hide\n",
     " <metrics> comma separated list of metrics to report\n",
     "     report all available metrics for the visible units\n\n",
-//    "     set power measurement to watts (default is mW)\n",
+    "     set power measurement to watts (default is mW)\n",
 };
 
 static const NSString* CPU_COMPLEX_PERF_STATES_SUBGROUP = @"CPU Complex Performance States";
 static const NSString* CPU_CORE_PERF_STATES_SUBGROUP = @"CPU Core Performance States";
 static const NSString* GPU_PERF_STATES_SUBGROUP = @"GPU Performance States";
+static const NSString* ANE_PERF_STATES_SUBGROUP = @"ANE Performance States";
+
 
 static const NSArray* performanceCounterKeys = @[ @"ECPU", @"PCPU", /* pleb chips (M1, M2, M3, M3 Pro) */
                                                  @"ECPU0", @"PCPU0", @"PCPU1", /* Max Chips */
@@ -131,7 +138,7 @@ static const NSArray* performanceCounterKeys = @[ @"ECPU", @"PCPU", /* pleb chip
 static NSString* P_STATE     = @"P";
 static NSString* V_STATE     = @"V";
 static NSString* IDLE_STATE  = @"IDLE";
-//static const NSString* DOWN_STATE  = @"DOWN";
+static const NSString* DOWN_STATE  = @"DOWN";
 static NSString* OFF_STATE   = @"OFF";
 
 typedef struct cmd_data {
@@ -145,6 +152,7 @@ typedef struct cmd_data {
         bool hide_ecpu;
         bool hide_pcpu;
         bool hide_gpu;
+        bool hide_ane;
         bool show_active;
         bool show_idle;
         bool show_freq;
@@ -152,7 +160,7 @@ typedef struct cmd_data {
         bool show_percore;
         bool show_dvfs;
         bool show_dvfs_volts;
-//        bool show_pwr;
+        bool show_pwr;
     } flags;
 } cmd_data;
 
@@ -169,7 +177,7 @@ typedef struct stats {
     uint32_t state_count;
 
     float freq;
-    //        float power;
+    float power;
     float mvolts;
     float active;
     float idle;
@@ -238,7 +246,7 @@ static void getDfvs(io_registry_entry_t entry, CFStringRef string, NSMutableArra
     }
 }
 
-static void makeDvfsTables(NSMutableArray* ecpu_table, NSMutableArray* pcpu_table, NSMutableArray* gpu_table, BOOL isLegacy) {
+static void makeDvfsTables(NSMutableArray* ecpu_table, NSMutableArray* pcpu_table, NSMutableArray* gpu_table, NSMutableArray* ane_table, BOOL isLegacy) {
     io_registry_entry_t entry;
     io_iterator_t iter;
     CFMutableDictionaryRef service;
@@ -254,6 +262,7 @@ static void makeDvfsTables(NSMutableArray* ecpu_table, NSMutableArray* pcpu_tabl
             getDfvs(entry, VOLTAGE_STATES_ECPU, ecpu_table, isLegacy);
             getDfvs(entry, VOLTAGE_STATES_PCPU, pcpu_table, isLegacy);
             getDfvs(entry, VOLTAGE_STATES_GPU, gpu_table, YES);
+            getDfvs(entry, VOLTAGE_STATES_ANE, ane_table, YES);
 
             break;
         }
@@ -280,8 +289,9 @@ NSMutableDictionary* filterChannelAndConstructCollection(CFMutableDictionaryRef 
     NSMutableArray* ecpuDvfs = [[NSMutableArray alloc] init];
     NSMutableArray* pcpuDvfs = [[NSMutableArray alloc] init];;
     NSMutableArray* gpuDvfs = [[NSMutableArray alloc] init];;
+    NSMutableArray* aneDvfs = [[NSMutableArray alloc] init];;
 
-    makeDvfsTables(ecpuDvfs, pcpuDvfs, gpuDvfs, isLegacy);
+    makeDvfsTables(ecpuDvfs, pcpuDvfs, gpuDvfs, aneDvfs,isLegacy);
 
     NSMutableDictionary* collection = [[NSMutableDictionary alloc] init];
     CFMutableArrayRef array = (CFMutableArrayRef)CFDictionaryGetValue(channel, CFSTR("IOReportChannels"));
@@ -319,6 +329,15 @@ NSMutableDictionary* filterChannelAndConstructCollection(CFMutableDictionaryRef 
                 NSString* channelName = @"GPUPH"; // We have no access to channel names so we can just assume the key is GPUPH on all systems
 
                 stats* stat = makeStats(channelName, gpuDvfs);
+
+                NSValue* pointer = [NSValue valueWithPointer:stat];
+                [collection setValue:pointer forKey: channelName];
+
+                channelName = nil;
+            } else if ([subgroup isEqual:ANE_PERF_STATES_SUBGROUP]) {
+                NSString* channelName = @"ANE"; // We have no access to channel names so we can just assume the key is GPUPH on all systems
+
+                stats* stat = makeStats(channelName, aneDvfs);
 
                 NSValue* pointer = [NSValue valueWithPointer:stat];
                 [collection setValue:pointer forKey: channelName];
@@ -464,18 +483,21 @@ void update(stats* stat, CFDictionaryRef channel) {
     void print(NSDictionary* collection, cmd_data* cmd) {
         for (NSString* key in collection) {
             NSValue* value = [collection objectForKey: key];
-
+            
             stats* parent = (stats*)[value pointerValue];
-
+            
             if (([parent->name containsString:@"E"] && cmd->flags.hide_ecpu) ||
                 ([parent->name containsString:@"P"] && cmd->flags.hide_pcpu) ||
-                ([parent->name containsString:@"G"] && cmd->flags.hide_gpu))
+                ([parent->name containsString:@"G"] && cmd->flags.hide_gpu) ||
+                ([parent->name containsString:@"A"] && cmd->flags.hide_ane))
             {
                 continue;
             }
 
             if ([parent->name isEqualTo:@"GPUPH"]) {
                 fprintf(stdout, "Integrated Graphics \n");
+            } else if ([parent->name isEqualTo:@"ANE"]) {
+                fprintf(stdout, "Apple Neural Engine \n");
             } else {
                 fprintf(stdout, "%ld-Core %s\n", [parent->childrenAray count], parent->name.UTF8String);
             }
@@ -493,15 +515,13 @@ void update(stats* stat, CFDictionaryRef channel) {
                 for (int i = 0; i < parent->state_count; i++) {
                     float value = parent->pstate_distribution[i] * 100;
 
-                    if (value > 0.009) {
-                        fprintf(stdout, "    %.f MHz", [parent->dvfs[i][0] floatValue]);
+                    fprintf(stdout, "    %.f MHz", [parent->dvfs[i][0] floatValue]);
 
-                        if (cmd->flags.show_dvfs_volts) fprintf(stdout, " (%.f mv)", [parent->dvfs[i][1] floatValue]);
+                    if (cmd->flags.show_dvfs_volts) fprintf(stdout, " (%.f mv)", [parent->dvfs[i][1] floatValue]);
 
-                        fprintf(stdout, ": %.2f%%\n", value);
+                    fprintf(stdout, ": %.2f%%\n", value);
 
-                        counter++;
-                    }
+                    counter++;
                 }
 
                 if (counter == 0) {
@@ -565,7 +585,7 @@ void update(stats* stat, CFDictionaryRef channel) {
 
     static void help(void) {
         fprintf(stdout, "\nUsage: %s [-a] [-i interval] [-s samples]\n\n\e[0m", getprogname());
-        fprintf(stdout, "  A sudoless tool to profile your Apple M-Series CPU+GPU active core\n  and cluster frequencies, residencies, and performance states.\n  Inspired by Powermetrics. Thrown together by dehydratedpotato.\n\nThe following command-line options are supported:\e[0m\n\n");
+        fprintf(stdout, "  A sudoless tool to profile your Apple M-Series CPU+GPU+ANE active core\n  and cluster frequencies, residencies, and performance states.\n  Inspired by Powermetrics. Thrown together by dehydratedpotato.\n\nThe following command-line options are supported:\e[0m\n\n");
 
         for (int i = 0; i < OPT_COUNT; i++) {
             fprintf(stdout, "    -%c, --%s%s", long_opts[i].val, long_opts[i].name, long_opts_description[i]);
@@ -621,7 +641,8 @@ int main(int argc, char * argv[]) {
     CFMutableDictionaryRef subscriptionChannel = nil;
     CFMutableDictionaryRef cpuChannel = IOReportCopyChannelsInGroup(@"CPU Stats", nil, 0, 0, 0);
     CFMutableDictionaryRef gpuChannel = IOReportCopyChannelsInGroup(@"GPU Stats", nil, 0, 0, 0);
-    IOReportMergeChannels(cpuChannel, gpuChannel, nil);
+    CFMutableDictionaryRef aneChannel = IOReportCopyChannelsInGroup(@"ANE Stats", nil, 0, 0, 0);
+    IOReportMergeChannels(cpuChannel, gpuChannel, aneChannel, nil);
 
     CFMutableDictionaryRef channel = CFDictionaryCreateMutableCopy(kCFAllocatorDefault, CFDictionaryGetCount(cpuChannel), cpuChannel);
     NSMutableDictionary* collection = filterChannelAndConstructCollection(channel, isLegacy);
@@ -681,8 +702,8 @@ int main(int argc, char * argv[]) {
                         cmd->flags.show_dvfs = true;
                     else if ([string isEqual:[NSString stringWithUTF8String:METRIC_DVFSVOLTS]])
                         cmd->flags.show_dvfs_volts = true;
-//                    else if ([string isEqual:[NSString stringWithUTF8String:METRIC_POWER]])
-//                        cmd->flags.show_pwr = true;
+                    else if ([string isEqual:[NSString stringWithUTF8String:METRIC_POWER]])
+                        cmd->flags.show_pwr = true;
                     else
                         error(1, "Incorrect metric option \"%s\" in list", [string UTF8String]);
                 }
@@ -703,6 +724,8 @@ int main(int argc, char * argv[]) {
                         cmd->flags.hide_pcpu = true;
                     }  else if ([string isEqual:@"gpu"]) {
                         cmd->flags.hide_gpu = true;
+                    } else if ([string isEqual:@"ane"]){
+                        cmd->flags.hide_ane = true;
                     } else
                         error(1, "Incorrect unit option \"%s\" in list", [string UTF8String]);
                 }
@@ -717,7 +740,7 @@ int main(int argc, char * argv[]) {
                 cmd->flags.show_dvfs = true;
                 cmd->flags.show_dvfs_volts = true;
                 cmd->flags.show_percore = true;
-//                cmd->flags.show_pwr = true;
+                cmd->flags.show_pwr = true;
                 break;
         }
     }
